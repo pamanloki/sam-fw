@@ -18,6 +18,7 @@
 
 const FETCH_TIMEOUT_MS = 10000;
 const FETCH_ATTEMPTS = 3;
+const FAIL_ALERT_THRESHOLD = 3; // alert kalau device gagal cek N kali berturut-turut
 const KV_DEVICES = "cfg:devices";
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -53,24 +54,38 @@ export default {
     }
     let update;
     try { update = await request.json(); } catch { return new Response("ok"); }
+
+    // Tombol inline (callback dari reply_markup)
+    if (update.callback_query) {
+      await handleCallback(env, update.callback_query);
+      return new Response("ok");
+    }
+
     const msg = update.message;
     if (msg && msg.text) {
       const chatId = msg.chat.id;
+      const text = msg.text.trim();
+      const cmd = text.split(/\s+/)[0].split("@")[0].toLowerCase();
+      const arg = text.slice(text.split(/\s+/)[0].length).trim();
+
+      // /id boleh dipakai siapa aja — buat cari chat id sendiri pas setup.
+      if (cmd === "/id") {
+        await sendMessage(env, chatId, `Chat ID kamu: <code>${chatId}</code>`);
+        return new Response("ok");
+      }
+
       // Batasi command cuma buat chat id resmi. Kalau CHAT_ID kosong, biarin (belum diset).
       const allowed = parseChatIds(env);
       if (allowed.length && !allowed.includes(String(chatId))) {
         return new Response("ok");
       }
-      const text = msg.text.trim();
-      const cmd = text.split(/\s+/)[0].split("@")[0].toLowerCase();
-      const arg = text.slice(text.split(/\s+/)[0].length).trim();
       try {
         if (cmd === "/latest")       await cmdLatest(env, chatId);
-        else if (cmd === "/devices") await sendMessage(env, chatId, await devicesList(env));
+        else if (cmd === "/devices") await sendMessage(env, chatId, await devicesList(env), mainKeyboard());
         else if (cmd === "/check")   await checkAll(env, true, chatId);
         else if (cmd === "/add")     await cmdAdd(env, chatId, arg);
         else if (cmd === "/remove")  await cmdRemove(env, chatId, arg);
-        else if (cmd === "/start" || cmd === "/help") await sendMessage(env, chatId, helpText());
+        else if (cmd === "/start" || cmd === "/help") await sendMessage(env, chatId, helpText(), mainKeyboard());
       } catch (e) {
         await sendMessage(env, chatId, "⚠️ " + (e.message || "error"));
       }
@@ -78,6 +93,35 @@ export default {
     return new Response("ok");
   },
 };
+
+async function handleCallback(env, cq) {
+  const chatId = cq.message && cq.message.chat ? cq.message.chat.id : null;
+  const allowed = parseChatIds(env);
+  if (allowed.length && chatId !== null && !allowed.includes(String(chatId))) {
+    await answerCallback(env, cq.id, "Nggak diizinkan");
+    return;
+  }
+  await answerCallback(env, cq.id);
+  if (chatId === null) return;
+  try {
+    if (cq.data === "check")       await checkAll(env, true, chatId);
+    else if (cq.data === "latest") await cmdLatest(env, chatId);
+    else if (cq.data === "devices") await sendMessage(env, chatId, await devicesList(env), mainKeyboard());
+  } catch (e) {
+    await sendMessage(env, chatId, "⚠️ " + (e.message || "error"));
+  }
+}
+
+function mainKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: "🔄 Cek update", callback_data: "check" },
+      { text: "📋 Versi terkini", callback_data: "latest" },
+    ], [
+      { text: "📱 Daftar device", callback_data: "devices" },
+    ]],
+  };
+}
 
 // Parse string daftar device -> [{model, region, name}]
 function parseDevices(str) {
@@ -189,23 +233,45 @@ function fmt(name, model, region, info, prev) {
   ].join("\n");
 }
 
+// Catat kegagalan cek device; alert sekali kalau gagal berturut-turut.
+async function noteFailure(env, key, d, errMsg) {
+  if (!env.FW) return;
+  let state = { count: 0, alerted: false };
+  try { const raw = await env.FW.get(key); if (raw) state = JSON.parse(raw); } catch {}
+  state.count = (state.count || 0) + 1;
+  if (state.count >= FAIL_ALERT_THRESHOLD && !state.alerted) {
+    for (const cid of parseChatIds(env)) {
+      await sendMessage(env, cid,
+        `⚠️ <b>Gagal cek firmware</b> — ${esc(d.name)}\n` +
+        `Model: <b>${esc(d.model)}</b> · Region: <b>${esc(d.region)}</b>\n` +
+        `Gagal ${state.count}× berturut-turut.\n<code>${esc(errMsg)}</code>\n` +
+        `Cek lagi model/region-nya bener atau nggak.`);
+    }
+    state.alerted = true;
+  }
+  await env.FW.put(key, JSON.stringify(state), { expirationTtl: 60 * 60 * 24 * 30 });
+}
+
 async function checkAll(env, manual, chatId) {
   const devices = await getDevices(env);
   const results = await Promise.all(devices.map(async (d) => {
+    const errKey = `err:${d.model}/${d.region}`;
     let info;
     try {
       info = await fetchFirmware(d.model, d.region);
     } catch (e) {
       console.log("checkAll fetch failed", d.model, d.region, e.message || e);
+      await noteFailure(env, errKey, d, e.message || String(e));
       return null;
     }
+    if (env.FW) await env.FW.delete(errKey); // sukses -> reset status gagal
     if (!info.version) return null;
     const key = `fw:${d.model}/${d.region}`;
     const prev = env.FW ? await env.FW.get(key) : null;
     if (info.version === prev) return null;
     if (prev !== null) {
       for (const cid of parseChatIds(env)) {
-        await sendMessage(env, cid, fmt(d.name, d.model, d.region, info, prev));
+        await sendMessage(env, cid, fmt(d.name, d.model, d.region, info, prev), mainKeyboard());
       }
     }
     if (env.FW) await env.FW.put(key, info.version);
@@ -214,7 +280,8 @@ async function checkAll(env, manual, chatId) {
   const changed = results.filter(Boolean);
   if (manual && chatId) {
     await sendMessage(env, chatId,
-      changed.length ? `✅ Ada update: ${changed.join(", ")}` : "Belum ada firmware baru sejak cek terakhir.");
+      changed.length ? `✅ Ada update: ${changed.join(", ")}` : "Belum ada firmware baru sejak cek terakhir.",
+      mainKeyboard());
   }
 }
 
@@ -232,7 +299,7 @@ async function cmdLatest(env, chatId) {
       return `📱 <b>${esc(d.name)}</b> — ⚠️ ${esc(e.message)}`;
     }
   }));
-  await sendMessage(env, chatId, blocks.join("\n\n") || "Belum ada device dikonfigurasi.");
+  await sendMessage(env, chatId, blocks.join("\n\n") || "Belum ada device dikonfigurasi.", mainKeyboard());
 }
 
 async function cmdAdd(env, chatId, arg) {
@@ -294,6 +361,7 @@ function helpText() {
     "/devices — daftar device dipantau",
     "/add MODEL/REGION/Nama — tambah device",
     "/remove MODEL/REGION — hapus device",
+    "/id — lihat chat id kamu",
     "/help — bantuan",
     "",
     "<i>Auto-notif jalan otomatis via jadwal (Cron).</i>",
@@ -304,11 +372,25 @@ function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-async function sendMessage(env, chatId, text) {
+async function answerCallback(env, id, text) {
+  try {
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: id, text: text || "" }),
+    });
+  } catch (e) {
+    console.log("answerCallback failed", e.message || e);
+  }
+}
+
+async function sendMessage(env, chatId, text, replyMarkup) {
+  const body = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
+  if (replyMarkup) body.reply_markup = replyMarkup;
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     console.log("telegram sendMessage failed", chatId, r.status, await r.text().catch(() => ""));
