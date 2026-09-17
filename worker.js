@@ -11,6 +11,7 @@
 //   DEVICES       (Text)    daftar device bawaan: "MODEL/REGION[/Nama]" dipisah koma
 //                           contoh: SM-A556E/XID/Galaxy A55
 //   SECRET_TOKEN  (Secret)  string acak; buat verifikasi webhook (command /latest)
+//   INCLUDE_BETA  (Text)    "true" (default) ikut notif firmware beta; "false" cuma stabil
 //
 // Cron Trigger (WAJIB, buat auto-cek): mis. "0 */6 * * *" (tiap 6 jam)
 // Webhook (opsional, buat command /latest,/start):
@@ -209,7 +210,20 @@ async function fetchFirmware(model, region) {
   const android = oAttr ? oAttr[1] : "?";
   // Versi Samsung = PDA/CSC/CP (kadang ada DATA di akhir). Pecah biar kebaca.
   const parts = version.split("/").map((s) => s.trim());
-  return { version, android, pda: parts[0] || "", csc: parts[1] || "", cp: parts[2] || "" };
+  const pda = parts[0] || "";
+  return { version, android, pda, csc: parts[1] || "", cp: parts[2] || "", beta: isBeta(pda) };
+}
+
+// Deteksi build beta dari kode PDA: huruf tepat setelah digit bootloader = "Z".
+// Contoh beta: S928BXXU1ZXI9 (…U1[Z]…), stabil: A556EXXU7BYG3 (…U7[B]…).
+function isBeta(pda) {
+  const m = String(pda || "").match(/[A-Z]{3}\d([A-Z])/);
+  return !!m && m[1] === "Z";
+}
+
+function includeBeta(env) {
+  const v = String(env.INCLUDE_BETA == null ? "true" : env.INCLUDE_BETA).trim().toLowerCase();
+  return !["false", "0", "no", "off"].includes(v);
 }
 
 function infoLines(info) {
@@ -222,7 +236,7 @@ function infoLines(info) {
 
 function fmt(name, model, region, info, prev) {
   return [
-    `📱 <b>Firmware baru</b> — ${esc(name)}`,
+    `📱 <b>Firmware baru</b> — ${esc(name)}${info.beta ? " 🧪 <b>Beta</b>" : ""}`,
     ``,
     `Model: <b>${esc(model)}</b>`,
     `Region: <b>${esc(region)}</b>`,
@@ -266,6 +280,7 @@ async function checkAll(env, manual, chatId) {
     }
     if (env.FW) await env.FW.delete(errKey); // sukses -> reset status gagal
     if (!info.version) return null;
+    if (info.beta && !includeBeta(env)) return null; // INCLUDE_BETA=false: abaikan beta
     const key = `fw:${d.model}/${d.region}`;
     const prev = env.FW ? await env.FW.get(key) : null;
     if (info.version === prev) return null;
@@ -291,7 +306,7 @@ async function cmdLatest(env, chatId) {
     try {
       const info = await fetchFirmware(d.model, d.region);
       return [
-        `📱 <b>${esc(d.name)}</b> (${esc(d.model)} · ${esc(d.region)})`,
+        `📱 <b>${esc(d.name)}</b> (${esc(d.model)} · ${esc(d.region)})${info.beta ? " 🧪 <b>Beta</b>" : ""}`,
         `Versi: <code>${esc(info.version || "?")}</code>`,
         ...infoLines(info),
       ].join("\n");
