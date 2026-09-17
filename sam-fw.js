@@ -5,7 +5,7 @@
 //
 // Env vars (Settings -> Variables and Secrets):
 //   BOT_TOKEN     (Secret)  token bot dari @BotFather
-//   CHAT_ID       (Text)    chat id tujuan notif
+//   CHAT_ID       (Text)    chat id tujuan notif; bisa banyak, dipisah koma
 //   DEVICES       (Text)    daftar device: "MODEL/REGION[/Nama]" dipisah koma
 //                           contoh: SM-A556E/XID/Galaxy A55
 //   SECRET_TOKEN  (Secret)  string acak; buat verifikasi webhook (command /latest)
@@ -13,6 +13,8 @@
 // Cron Trigger (WAJIB, buat auto-cek): mis. "0 */6 * * *" (tiap 6 jam)
 // Webhook (opsional, buat command /latest,/start):
 //   curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>&secret_token=<SECRET_TOKEN>"
+
+const FETCH_TIMEOUT_MS = 10000;
 
 export default {
   // Auto-cek terjadwal (Cron Trigger)
@@ -74,46 +76,80 @@ function parseDevices(env) {
     .filter((d) => d.model && d.region);
 }
 
+function parseChatIds(env) {
+  return String(env.CHAT_ID || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 async function fetchFirmware(model, region) {
   const url = `https://fota-cloud-dn.ospserver.net/firmware/${region}/${model}/version.xml`;
-  const r = await fetch(url, { headers: { "User-Agent": "Kies2.0_FUS" } });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  let r;
+  try {
+    r = await fetch(url, { headers: { "User-Agent": "Kies2.0_FUS" }, signal: ctrl.signal });
+  } catch (e) {
+    throw new Error(`FOTA ${model}/${region}: ${e.name === "AbortError" ? "timeout" : (e.message || e)}`);
+  } finally {
+    clearTimeout(timer);
+  }
   if (!r.ok) throw new Error(`FOTA ${model}/${region} HTTP ${r.status}`);
   const xml = await r.text();
   const tag = xml.match(/<latest\b[^>]*>([^<]*)<\/latest>/i);
   const version = tag ? tag[1].trim() : "";
   const oAttr = xml.match(/<latest\b[^>]*\bo="([^"]*)"/i);
   const android = oAttr ? oAttr[1] : "?";
-  return { version, android };
+  // Versi Samsung = PDA/CSC/CP (kadang ada DATA di akhir). Pecah biar kebaca.
+  const parts = version.split("/").map((s) => s.trim());
+  return { version, android, pda: parts[0] || "", csc: parts[1] || "", cp: parts[2] || "" };
 }
 
-function fmt(name, model, region, info) {
+function infoLines(info) {
+  const lines = [`Android: <b>${esc(info.android)}</b>`];
+  if (info.pda) lines.push(`PDA (AP): <code>${esc(info.pda)}</code>`);
+  if (info.csc) lines.push(`CSC: <code>${esc(info.csc)}</code>`);
+  if (info.cp)  lines.push(`CP (modem): <code>${esc(info.cp)}</code>`);
+  return lines;
+}
+
+function fmt(name, model, region, info, prev) {
   return [
     `📱 <b>Firmware baru</b> — ${esc(name)}`,
     ``,
     `Model: <b>${esc(model)}</b>`,
     `Region: <b>${esc(region)}</b>`,
-    `Versi: <code>${esc(info.version)}</code>`,
-    `Android: <b>${esc(info.android)}</b>`,
+    prev
+      ? `Versi: <code>${esc(prev)}</code> → <code>${esc(info.version)}</code>`
+      : `Versi: <code>${esc(info.version)}</code>`,
+    ...infoLines(info),
   ].join("\n");
 }
 
 async function checkAll(env, manual, chatId) {
   const devices = parseDevices(env);
-  const changed = [];
-  for (const d of devices) {
+  const results = await Promise.all(devices.map(async (d) => {
     let info;
-    try { info = await fetchFirmware(d.model, d.region); } catch (e) { continue; }
-    if (!info.version) continue;
+    try {
+      info = await fetchFirmware(d.model, d.region);
+    } catch (e) {
+      console.log("checkAll fetch failed", d.model, d.region, e.message || e);
+      return null;
+    }
+    if (!info.version) return null;
     const key = `fw:${d.model}/${d.region}`;
     const prev = env.FW ? await env.FW.get(key) : null;
-    if (info.version !== prev) {
-      if (prev !== null) {
-        await sendMessage(env, env.CHAT_ID, fmt(d.name, d.model, d.region, info));
-        changed.push(d.name);
+    if (info.version === prev) return null;
+    if (prev !== null) {
+      for (const cid of parseChatIds(env)) {
+        await sendMessage(env, cid, fmt(d.name, d.model, d.region, info, prev));
       }
-      if (env.FW) await env.FW.put(key, info.version);
     }
-  }
+    if (env.FW) await env.FW.put(key, info.version);
+    return prev !== null ? d.name : null;
+  }));
+  const changed = results.filter(Boolean);
   if (manual && chatId) {
     await sendMessage(env, chatId,
       changed.length ? `✅ Ada update: ${changed.join(", ")}` : "Belum ada firmware baru sejak cek terakhir.");
@@ -122,19 +158,18 @@ async function checkAll(env, manual, chatId) {
 
 async function cmdLatest(env, chatId) {
   const devices = parseDevices(env);
-  const blocks = [];
-  for (const d of devices) {
+  const blocks = await Promise.all(devices.map(async (d) => {
     try {
       const info = await fetchFirmware(d.model, d.region);
-      blocks.push(
-        `📱 <b>${esc(d.name)}</b> (${esc(d.model)} · ${esc(d.region)})\n` +
-        `Versi: <code>${esc(info.version || "?")}</code>\n` +
-        `Android: <b>${esc(info.android)}</b>`
-      );
+      return [
+        `📱 <b>${esc(d.name)}</b> (${esc(d.model)} · ${esc(d.region)})`,
+        `Versi: <code>${esc(info.version || "?")}</code>`,
+        ...infoLines(info),
+      ].join("\n");
     } catch (e) {
-      blocks.push(`📱 <b>${esc(d.name)}</b> — ⚠️ ${esc(e.message)}`);
+      return `📱 <b>${esc(d.name)}</b> — ⚠️ ${esc(e.message)}`;
     }
-  }
+  }));
   await sendMessage(env, chatId, blocks.join("\n\n") || "Belum ada device dikonfigurasi.");
 }
 
@@ -161,9 +196,13 @@ function esc(s) {
 }
 
 async function sendMessage(env, chatId, text) {
-  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
   });
+  if (!r.ok) {
+    console.log("telegram sendMessage failed", chatId, r.status, await r.text().catch(() => ""));
+  }
+  return r;
 }
