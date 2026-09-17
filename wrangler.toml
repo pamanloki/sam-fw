@@ -8,7 +8,7 @@
 #   4) sesuaikan CHAT_ID & DEVICES di [vars], lalu: npx wrangler deploy
 
 name = "sam-fw"
-main = "sam-fw.js"
+main = "worker.js"
 compatibility_date = "2025-09-01"
 
 # Cron: auto-cek tiap 6 jam.
