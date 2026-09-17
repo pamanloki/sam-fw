@@ -1,0 +1,30 @@
+# Konfigurasi deploy Cloudflare Worker.
+# Deploy:  npx wrangler deploy
+#
+# Langkah awal:
+#   1) npx wrangler kv namespace create FW   -> salin "id" ke bawah
+#   2) npx wrangler secret put BOT_TOKEN
+#   3) npx wrangler secret put SECRET_TOKEN
+#   4) sesuaikan CHAT_ID & DEVICES di [vars], lalu: npx wrangler deploy
+
+name = "sam-fw"
+main = "sam-fw.js"
+compatibility_date = "2025-09-01"
+
+# Cron: auto-cek tiap 6 jam.
+[triggers]
+crons = ["0 */6 * * *"]
+
+# KV namespace (WAJIB). Ganti id dengan hasil `wrangler kv namespace create FW`.
+[[kv_namespaces]]
+binding = "FW"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Variabel non-rahasia. CHAT_ID bisa banyak (dipisah koma).
+[vars]
+CHAT_ID = ""
+DEVICES = "SM-A556E/XID/Galaxy A55"
+
+# Rahasia JANGAN ditaruh di file ini — set lewat CLI:
+#   npx wrangler secret put BOT_TOKEN
+#   npx wrangler secret put SECRET_TOKEN
