@@ -33,8 +33,27 @@ export default {
   // Webhook Telegram (command manual) + route debug GET
   async fetch(request, env) {
     if (request.method !== "POST") {
+      const params = new URL(request.url).searchParams;
+      // Debug: buka  <worker-url>/?doc=SM-A556E/XID  buat lihat isi mentah changelog Samsung.
+      const dbgDoc = params.get("doc");
+      if (dbgDoc) {
+        const [model, region] = dbgDoc.split("/");
+        const url = `https://doc.samsungmobile.com/${model}/${region}/doc.html`;
+        try {
+          const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+          const body = await r.text();
+          const stripped = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          return new Response(
+            `URL: ${url}\nHTTP ${r.status}  ct=${r.headers.get("content-type") || "?"}  len=${body.length}\n\n` +
+            `--- RAW (0..1800) ---\n${body.slice(0, 1800)}\n\n--- TEXT (0..1800) ---\n${stripped.slice(0, 1800)}`,
+            { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+        } catch (e) {
+          return new Response(`DOC ERROR: ${e.message || e}\nURL: ${url}`, {
+            status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+        }
+      }
       // Debug: buka  <worker-url>/?fw=SM-A556E/XID  buat cek reachability dari IP Worker.
-      const q = new URL(request.url).searchParams.get("fw");
+      const q = params.get("fw");
       if (q) {
         const [model, region] = q.split("/");
         try {
