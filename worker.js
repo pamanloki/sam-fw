@@ -279,26 +279,33 @@ function includeBeta(env) {
 // Ambil changelog resmi Samsung buat SPL & tanggal rilis pasti.
 // doc.html (indeks) -> ambil ID -> eng.html (isi changelog, entri per build).
 // Best-effort: kalau gagal/format beda, balikin kosong -> fallback ke perkiraan build.
+// Label multi-bahasa (Inggris + Korea; region non-EN sering cuma pny bhs lokal).
+const RE_BUILD = /(?:Build Number|빌드\s*번호)\s*[:：]/i;
+const RE_SPL = /(?:Security patch level|보안\s*패치\s*레벨)\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i;
+const RE_REL = /(?:Release Date|릴리[즈스]\s*일자)\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i;
+
 async function fetchChangelog(model, region, pda) {
   try {
-    const idxUrl = `https://doc.samsungmobile.com/${model}/${region}/doc.html`;
-    const ri = await fetchWithRetry(idxUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const UA = { headers: { "User-Agent": "Mozilla/5.0" } };
+    const ri = await fetchWithRetry(`https://doc.samsungmobile.com/${model}/${region}/doc.html`, UA);
     const idx = await ri.text();
-    const ids = [...idx.matchAll(/\/(\d{6,})\/eng\.html/g)].map((m) => m[1]);
-    const id = [...new Set(ids)].sort().pop();
-    if (!id) return { spl: "", release: "" };
+    const pairs = [...idx.matchAll(/\/(\d{6,})\/([a-z-]+)\.html/g)];
+    if (!pairs.length) return { spl: "", release: "" };
+    const id = [...new Set(pairs.map((p) => p[1]))].sort().pop();
+    const langs = [...new Set(pairs.filter((p) => p[1] === id).map((p) => p[2]))];
+    const lang = langs.includes("eng") ? "eng" : langs[0]; // eng kalau ada, kalau nggak pakai yg tersedia
 
-    const rs = await fetchWithRetry(`https://doc.samsungmobile.com/${model}/${id}/eng.html`, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const rs = await fetchWithRetry(`https://doc.samsungmobile.com/${model}/${id}/${lang}.html`, UA);
     const text = (await rs.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
     // Pisah per entri build, lalu pilih yg Build Number-nya cocok dgn versi sekarang.
-    const entries = text.split(/Build Number\s*[:：]/i).slice(1);
+    const entries = text.split(RE_BUILD).slice(1);
     const target = String(pda || "").toUpperCase();
     let seg = target ? entries.find((e) => e.slice(0, 40).toUpperCase().includes(target)) : null;
     if (!seg) seg = entries[0] || text;
 
-    const spl = (seg.match(/Security patch level\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
-    const rel = (seg.match(/Release Date\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
+    const spl = (seg.match(RE_SPL) || [])[1] || "";
+    const rel = (seg.match(RE_REL) || [])[1] || "";
     return { spl, release: rel };
   } catch (e) {
     console.log("changelog fetch failed", model, region, e.message || e);
