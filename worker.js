@@ -67,7 +67,7 @@ export default {
         const [model, region] = q.split("/");
         try {
           const info = await fetchFirmware(model, region);
-          const cl = await fetchChangelog(model, region);
+          const cl = await fetchChangelog(model, region, info.pda);
           return new Response(
             `OK ${model}/${region}\nversion=${info.version || "(kosong)"}\nandroid=${info.android}\n` +
             `beta=${info.beta}\npatch≈=${info.patch || "-"}\nspl=${cl.spl || "-"}\nrelease=${cl.release || "-"}`,
@@ -272,15 +272,29 @@ function includeBeta(env) {
   return !["false", "0", "no", "off"].includes(v);
 }
 
-// Ambil changelog resmi Samsung (doc.samsungmobile.com) buat SPL & tanggal rilis pasti.
+// Ambil changelog resmi Samsung buat SPL & tanggal rilis pasti.
+// doc.html (indeks) -> ambil ID -> eng.html (isi changelog, entri per build).
 // Best-effort: kalau gagal/format beda, balikin kosong -> fallback ke perkiraan build.
-async function fetchChangelog(model, region) {
-  const url = `https://doc.samsungmobile.com/${model}/${region}/doc.html`;
+async function fetchChangelog(model, region, pda) {
   try {
-    const r = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    const text = (await r.text()).replace(/<[^>]+>/g, " ");
-    const spl = (text.match(/Security patch level\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
-    const rel = (text.match(/Release Date\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
+    const idxUrl = `https://doc.samsungmobile.com/${model}/${region}/doc.html`;
+    const ri = await fetchWithRetry(idxUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const idx = await ri.text();
+    const ids = [...idx.matchAll(/\/(\d{6,})\/eng\.html/g)].map((m) => m[1]);
+    const id = [...new Set(ids)].sort().pop();
+    if (!id) return { spl: "", release: "" };
+
+    const rs = await fetchWithRetry(`https://doc.samsungmobile.com/${model}/${id}/eng.html`, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const text = (await rs.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+
+    // Pisah per entri build, lalu pilih yg Build Number-nya cocok dgn versi sekarang.
+    const entries = text.split(/Build Number\s*[:：]/i).slice(1);
+    const target = String(pda || "").toUpperCase();
+    let seg = target ? entries.find((e) => e.slice(0, 40).toUpperCase().includes(target)) : null;
+    if (!seg) seg = entries[0] || text;
+
+    const spl = (seg.match(/Security patch level\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
+    const rel = (seg.match(/Release Date\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
     return { spl, release: rel };
   } catch (e) {
     console.log("changelog fetch failed", model, region, e.message || e);
@@ -290,7 +304,7 @@ async function fetchChangelog(model, region) {
 
 // Lengkapi info dengan SPL & tanggal rilis dari changelog (kalau ada).
 async function enrich(info, model, region) {
-  const cl = await fetchChangelog(model, region);
+  const cl = await fetchChangelog(model, region, info.pda);
   info.spl = cl.spl;
   info.release = cl.release;
   return info;
