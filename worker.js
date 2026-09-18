@@ -42,19 +42,23 @@ export default {
         try {
           const ri = await fetch(idxUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
           const idx = await ri.text();
-          const ids = [...idx.matchAll(/\/(\d{6,})\/eng\.html/g)].map((m) => m[1]);
+          const ids = [...idx.matchAll(/\/(\d{6,})\/[a-z-]+\.html/g)].map((m) => m[1]);
+          const langs = [...new Set([...idx.matchAll(/\/\d{6,}\/([a-z-]+)\.html/g)].map((m) => m[1]))];
           const uniq = [...new Set(ids)].sort();
           const latest = uniq[uniq.length - 1] || "";
-          let subUrl = "", subText = "";
-          if (latest) {
-            subUrl = `https://doc.samsungmobile.com/${model}/${latest}/eng.html`;
-            const rs = await fetch(subUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-            subText = (await rs.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          async function dump(lang) {
+            if (!latest) return `${lang}: (no id)`;
+            const u = `https://doc.samsungmobile.com/${model}/${latest}/${lang}.html`;
+            try {
+              const r = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" } });
+              const t = (await r.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+              return `${lang}.html http=${r.status} len=${t.length}\n${t.slice(0, 900)}`;
+            } catch (e) { return `${lang}.html ERROR ${e.message || e}`; }
           }
           return new Response(
             `INDEX: ${idxUrl}  http=${ri.status} len=${idx.length}\n` +
-            `IDs(${uniq.length}) last6: ${uniq.slice(-6).join(", ")}\n` +
-            `LATEST: ${latest}\nSUB: ${subUrl}\n\n--- SUB TEXT (0..2500) ---\n${subText.slice(0, 2500) || "(kosong)"}`,
+            `IDs(${uniq.length}) last6: ${uniq.slice(-6).join(", ")}\nLATEST: ${latest}\n` +
+            `LANGS(${langs.length}): ${langs.join(", ")}\n\n--- ENG ---\n${await dump("eng")}\n\n--- KOR ---\n${await dump("kor")}`,
             { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
         } catch (e) {
           return new Response(`DOC ERROR: ${e.message || e}\nURL: ${idxUrl}`, {
