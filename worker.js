@@ -38,17 +38,26 @@ export default {
       const dbgDoc = params.get("doc");
       if (dbgDoc) {
         const [model, region] = dbgDoc.split("/");
-        const url = `https://doc.samsungmobile.com/${model}/${region}/doc.html`;
+        const idxUrl = `https://doc.samsungmobile.com/${model}/${region}/doc.html`;
         try {
-          const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-          const body = await r.text();
-          const stripped = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          const ri = await fetch(idxUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+          const idx = await ri.text();
+          const ids = [...idx.matchAll(/\/(\d{6,})\/eng\.html/g)].map((m) => m[1]);
+          const uniq = [...new Set(ids)].sort();
+          const latest = uniq[uniq.length - 1] || "";
+          let subUrl = "", subText = "";
+          if (latest) {
+            subUrl = `https://doc.samsungmobile.com/${model}/${latest}/eng.html`;
+            const rs = await fetch(subUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+            subText = (await rs.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          }
           return new Response(
-            `URL: ${url}\nHTTP ${r.status}  ct=${r.headers.get("content-type") || "?"}  len=${body.length}\n\n` +
-            `--- RAW (0..1800) ---\n${body.slice(0, 1800)}\n\n--- TEXT (0..1800) ---\n${stripped.slice(0, 1800)}`,
+            `INDEX: ${idxUrl}  http=${ri.status} len=${idx.length}\n` +
+            `IDs(${uniq.length}) last6: ${uniq.slice(-6).join(", ")}\n` +
+            `LATEST: ${latest}\nSUB: ${subUrl}\n\n--- SUB TEXT (0..2500) ---\n${subText.slice(0, 2500) || "(kosong)"}`,
             { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
         } catch (e) {
-          return new Response(`DOC ERROR: ${e.message || e}\nURL: ${url}`, {
+          return new Response(`DOC ERROR: ${e.message || e}\nURL: ${idxUrl}`, {
             status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
         }
       }
