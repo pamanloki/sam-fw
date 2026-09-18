@@ -211,7 +211,23 @@ async function fetchFirmware(model, region) {
   // Versi Samsung = PDA/CSC/CP (kadang ada DATA di akhir). Pecah biar kebaca.
   const parts = version.split("/").map((s) => s.trim());
   const pda = parts[0] || "";
-  return { version, android, pda, csc: parts[1] || "", cp: parts[2] || "", beta: isBeta(pda) };
+  return { version, android, pda, csc: parts[1] || "", cp: parts[2] || "", beta: isBeta(pda), patch: decodeBuildDate(pda) };
+}
+
+const BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+
+// Perkiraan bulan build (≈ security patch) dari kode PDA.
+// 3rd-from-last = tahun, 2nd-from-last = bulan. Cth A556EXXU7BYG3 -> Y=2025, G=Jul.
+function decodeBuildDate(pda) {
+  const s = String(pda || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (s.length < 3) return "";
+  const yc = s.charCodeAt(s.length - 3); // tahun (huruf)
+  const mc = s.charCodeAt(s.length - 2); // bulan (huruf)
+  if (yc < 65 || yc > 90 || mc < 65 || mc > 90) return "";
+  const year = 2016 + (yc - 80);       // P=2016, ... Y=2025, Z=2026
+  const month = mc - 65 + 1;           // A=Jan ... L=Des
+  if (month < 1 || month > 12 || year < 2014 || year > 2035) return "";
+  return `${BULAN[month - 1]} ${year}`;
 }
 
 // Deteksi build beta dari kode PDA: huruf tepat setelah digit bootloader = "Z".
@@ -228,6 +244,7 @@ function includeBeta(env) {
 
 function infoLines(info) {
   const lines = [`Android: <b>${esc(info.android)}</b>`];
+  if (info.patch) lines.push(`Patch (≈build): <b>${esc(info.patch)}</b>`);
   if (info.pda) lines.push(`PDA (AP): <code>${esc(info.pda)}</code>`);
   if (info.csc) lines.push(`CSC: <code>${esc(info.csc)}</code>`);
   if (info.cp)  lines.push(`CP (modem): <code>${esc(info.cp)}</code>`);
