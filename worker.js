@@ -39,8 +39,10 @@ export default {
         const [model, region] = q.split("/");
         try {
           const info = await fetchFirmware(model, region);
+          const cl = await fetchChangelog(model, region);
           return new Response(
-            `OK ${model}/${region}\nversion=${info.version || "(kosong)"}\nandroid=${info.android}`,
+            `OK ${model}/${region}\nversion=${info.version || "(kosong)"}\nandroid=${info.android}\n` +
+            `beta=${info.beta}\npatch≈=${info.patch || "-"}\nspl=${cl.spl || "-"}\nrelease=${cl.release || "-"}`,
             { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
         } catch (e) {
           return new Response("ERROR: " + (e.message || e), {
@@ -242,9 +244,35 @@ function includeBeta(env) {
   return !["false", "0", "no", "off"].includes(v);
 }
 
+// Ambil changelog resmi Samsung (doc.samsungmobile.com) buat SPL & tanggal rilis pasti.
+// Best-effort: kalau gagal/format beda, balikin kosong -> fallback ke perkiraan build.
+async function fetchChangelog(model, region) {
+  const url = `https://doc.samsungmobile.com/${model}/${region}/doc.html`;
+  try {
+    const r = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const text = (await r.text()).replace(/<[^>]+>/g, " ");
+    const spl = (text.match(/Security patch level\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
+    const rel = (text.match(/Release Date\s*[:：]\s*(\d{4}-\d{2}-\d{2})/i) || [])[1] || "";
+    return { spl, release: rel };
+  } catch (e) {
+    console.log("changelog fetch failed", model, region, e.message || e);
+    return { spl: "", release: "" };
+  }
+}
+
+// Lengkapi info dengan SPL & tanggal rilis dari changelog (kalau ada).
+async function enrich(info, model, region) {
+  const cl = await fetchChangelog(model, region);
+  info.spl = cl.spl;
+  info.release = cl.release;
+  return info;
+}
+
 function infoLines(info) {
   const lines = [`Android: <b>${esc(info.android)}</b>`];
-  if (info.patch) lines.push(`Patch (≈build): <b>${esc(info.patch)}</b>`);
+  if (info.spl) lines.push(`Security patch: <b>${esc(info.spl)}</b>`);
+  else if (info.patch) lines.push(`Patch (≈build): <b>${esc(info.patch)}</b>`);
+  if (info.release) lines.push(`Rilis: <b>${esc(info.release)}</b>`);
   if (info.pda) lines.push(`PDA (AP): <code>${esc(info.pda)}</code>`);
   if (info.csc) lines.push(`CSC: <code>${esc(info.csc)}</code>`);
   if (info.cp)  lines.push(`CP (modem): <code>${esc(info.cp)}</code>`);
@@ -302,6 +330,7 @@ async function checkAll(env, manual, chatId) {
     const prev = env.FW ? await env.FW.get(key) : null;
     if (info.version === prev) return null;
     if (prev !== null) {
+      await enrich(info, d.model, d.region); // SPL & tgl rilis dari changelog
       for (const cid of parseChatIds(env)) {
         await sendMessage(env, cid, fmt(d.name, d.model, d.region, info, prev), mainKeyboard());
       }
@@ -322,6 +351,7 @@ async function cmdLatest(env, chatId) {
   const blocks = await Promise.all(devices.map(async (d) => {
     try {
       const info = await fetchFirmware(d.model, d.region);
+      await enrich(info, d.model, d.region);
       return [
         `📱 <b>${esc(d.name)}</b> (${esc(d.model)} · ${esc(d.region)})${info.beta ? " 🧪 <b>Beta</b>" : ""}`,
         `Versi: <code>${esc(info.version || "?")}</code>`,
